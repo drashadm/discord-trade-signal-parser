@@ -1,0 +1,1 @@
+# discord-trade-signal-parser
