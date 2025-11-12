@@ -16,3 +16,9 @@ data/charts/
 .DS_Store
 Thumbs.db
 .vscode/
+# --- Keep clean outputs and charts visible ---
+!data/clean/
+!data/charts/
+!data/charts/*.png
+!data/clean/*.csv
+!data/clean/*.db
