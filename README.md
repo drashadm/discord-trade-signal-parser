@@ -34,7 +34,7 @@ Designed for fintech engineers, AI developers, and data enthusiasts who want to:
 
 ---
 
-**“From Discord noise to actionable data — automatically.”**
+**“From Discord noise to actionable data automatically.”**
 
 
 ---
