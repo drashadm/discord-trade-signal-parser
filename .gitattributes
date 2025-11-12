@@ -1,0 +1,46 @@
+# ===========================================
+# Git Attributes for Discord Trade Parser
+# Optimized for CSV, Python, and chart files
+# ===========================================
+
+# --- Normalize line endings ---
+* text=auto eol=lf
+
+# --- Python code ---
+*.py text diff=python
+
+# --- Markdown / Documentation ---
+*.md text diff=markdown
+*.txt text
+*.yaml text
+*.yml text
+
+# --- CSVs and data files ---
+*.csv text diff=csv
+*.db binary
+*.sqlite binary
+*.json text diff=json
+
+# --- Chart images ---
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+
+# --- Config files ---
+.env text
+*.ini text
+*.cfg text
+
+# --- Ignore OS / editor noise ---
+*.log text
+*.bak text
+*.tmp text
+.DS_Store binary
+Thumbs.db binary
+
+# --- Ensure consistent diff behavior on GitHub ---
+diff=csv
+*.csv linguist-detectable=true
+*.py linguist-language=Python
+*.md linguist-language=Markdown
