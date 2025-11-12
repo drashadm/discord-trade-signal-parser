@@ -1,7 +1,41 @@
-# Discord Trade Signal Parser
+# Discord → Data → Decisions  
+### Automated Trade Signal Parser & Analyzer
 
-An automated **ETL pipeline** that transforms raw Discord trading alerts into structured, analyzable data.  
-It fetches messages from your trading servers, parses TradingView-style alerts ( CALL / PUT), and exports clean datasets with charts for analytics and machine learning.
+**Goal:** Turn noisy trading chatter into clean, analyzable datasets.
+
+This AI-powered pipeline automatically:
+-  Extracts structured alerts from Discord
+-  Cleans and normalizes text for consistency
+-  Stores results in a local/remote database
+-  Generates visual summaries for quick insights
+
+Next step: **ML-based performance scoring** for predictive signal quality.
+
+---
+
+### Tech Stack
+- Python • Pandas • Matplotlib • Regex • SQLite  
+- Discord API • Data Cleaning Pipelines • Automation via GitHub Actions  
+
+---
+
+### Use Case
+Designed for fintech engineers, AI developers, and data enthusiasts who want to:
+- Build ML-ready trading datasets  
+- Automate Discord/Telegram signal tracking  
+- Create analytics dashboards for trade accuracy  
+
+---
+
+### Future Roadmap
+- ML Scoring System (signal reliability)
+- Hugging Face Integration (ETL demo space)
+- Cloud-based visualization dashboard  
+
+---
+
+**“From Discord noise to actionable data — automatically.”**
+
 
 ---
 
