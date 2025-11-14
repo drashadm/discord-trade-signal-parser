@@ -3,15 +3,9 @@
 # Tested on Python 3.11–3.12
 # ============================
 
-# Core
-discord.py==2.3.2
-pandas==2.2.2
-matplotlib==3.9.0
-python-dotenv==1.0.1
-numpy>=1.26.4,<2.0
-requests==2.32.3
-
-# Compatibility & Typing
-typing-extensions>=4.9,<5.0
-pyparsing>=3.1.2
-certifi>=2024.2.2
+openai>=1.30.0
+pandas>=2.2.0
+pyyaml>=6.0
+jsonschema>=4.21.0
+requests>=2.32.0
+python-dateutil>=2.9.0
