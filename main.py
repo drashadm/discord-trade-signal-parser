@@ -2,7 +2,7 @@
 main.py
 Autonomous AI Data Intelligence Orchestrator
 Author: @drashadm (DeAndrai Mullen)
-Version: 1.1.2 (Production Hardened+)
+Version: 1.1.3 (Budget-Protected + Production Hardened)
 """
 
 from __future__ import annotations
@@ -33,6 +33,19 @@ RAW_PATH = RAW_DIR / "discord_export.csv"
 PARSED_PATH = RAW_DIR / "parsed_signals.csv"
 CLEAN_PATH = CLEAN_DIR / "trade_signals.csv"
 
+# === Cost Control Constants ===
+MAX_MESSAGES_PER_RUN = 25_000       # protects your $10 budget with GPT-4.1-mini
+MAX_RUN_COST_USD = 10.00            # hard limit — pipeline aborts if exceeded
+
+# Pricing for GPT-4.1-mini (update as needed)
+OPENAI_INPUT_PRICE = 0.40           # cost per 1M input tokens (USD)
+OPENAI_OUTPUT_PRICE = 1.60          # cost per 1M output tokens (USD)
+
+# Token estimation constants
+CHARS_PER_TOKEN = 4
+BASE_PROMPT_TOKENS = 300            # system + instructions per message
+OUTPUT_MULTIPLIER = 0.40            # output ≈ 40% of input tokens
+
 # === Logging ===
 LOG_FILE = LOG_DIR / "pipeline.log"
 logging.basicConfig(
@@ -53,7 +66,9 @@ _lock = Lock()
 def _rotate_telemetry_if_needed():
     try:
         if TELEMETRY_LOG.exists() and TELEMETRY_LOG.stat().st_size > 5_000_000:
-            rotated = TELEMETRY_LOG.with_name(f"{TELEMETRY_LOG.stem}.{datetime.utcnow():%Y%m%d%H%M}.json")
+            rotated = TELEMETRY_LOG.with_name(
+                f"{TELEMETRY_LOG.stem}.{datetime.utcnow():%Y%m%d%H%M}.json"
+            )
             TELEMETRY_LOG.rename(rotated)
             logger.info(f"Telemetry rotated: {rotated}")
     except Exception as e:
@@ -71,11 +86,13 @@ def log_telemetry(event: str, **kwargs):
             if TELEMETRY_LOG.exists():
                 try:
                     data = json.loads(TELEMETRY_LOG.read_text(encoding="utf-8"))
-                    if not isinstance(data, list): data = [data]
+                    if not isinstance(data, list):
+                        data = [data]
                 except Exception:
                     data = []
             else:
                 data = []
+
             data.append(entry)
             tmp = TELEMETRY_LOG.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -89,6 +106,20 @@ def handle_sigint(signum, frame):
     log_telemetry("pipeline_interrupted")
     sys.exit(130)
 signal.signal(signal.SIGINT, handle_sigint)
+
+# === Token + Cost Estimation ===
+def estimate_tokens_for_message(msg: str) -> int:
+    content_tokens = max(1, len(msg) // CHARS_PER_TOKEN)
+    return BASE_PROMPT_TOKENS + content_tokens
+
+def estimate_run_cost(messages: list[str]) -> tuple[int, int, float]:
+    total_input_tokens = sum(estimate_tokens_for_message(m) for m in messages)
+    estimated_output_tokens = int(total_input_tokens * OUTPUT_MULTIPLIER)
+
+    cost_input = (total_input_tokens / 1_000_000) * OPENAI_INPUT_PRICE
+    cost_output = (estimated_output_tokens / 1_000_000) * OPENAI_OUTPUT_PRICE
+
+    return total_input_tokens, estimated_output_tokens, cost_input + cost_output
 
 # === Stage Runner ===
 def run_stage(stage_name: str, func, *args, retries: int = 1, **kwargs) -> bool:
@@ -108,7 +139,7 @@ def run_stage(stage_name: str, func, *args, retries: int = 1, **kwargs) -> bool:
             traceback.print_exc()
             log_telemetry("stage_failed", stage=stage_name, duration_sec=duration, error=str(e))
             if attempt < retries:
-                logger.info(f" Retrying {stage_name} in 2s...")
+                logger.info(" Retrying stage in 2s...")
                 time.sleep(2)
             else:
                 return False
@@ -121,9 +152,11 @@ def preflight_checks():
     if missing:
         logger.error(f" Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
     if not RAW_PATH.exists():
         logger.error(f" Missing raw dataset at {RAW_PATH}. Please export Discord data first.")
         sys.exit(1)
+
     logger.info(" Environment and dataset verified.")
 
 # === Semantic Parser Wrapper ===
@@ -140,20 +173,62 @@ def main():
     start_time = time.time()
     preflight_checks()
 
-    # Stage 1️⃣ Semantic Parsing
-    logger.info(" Stage 1: Semantic Parsing (transforming raw Discord messages to structured data)...")
+    # Stage Read raw dataset
     df_raw = pd.read_csv(RAW_PATH)
     if "content" not in df_raw.columns:
         logger.error(" Missing 'content' column in raw dataset.")
         sys.exit(1)
 
+    total_messages = len(df_raw)
+    logger.info(f" Raw dataset contains {total_messages} messages.")
+
+    # === Budget Protection: Cap message count ===
+    if total_messages > MAX_MESSAGES_PER_RUN:
+        logger.warning(
+            f"Dataset has {total_messages} messages — exceeding MAX_MESSAGES_PER_RUN={MAX_MESSAGES_PER_RUN}. "
+            "Truncating dataset to protect budget."
+        )
+        df_raw = df_raw.head(MAX_MESSAGES_PER_RUN)
+        total_messages = MAX_MESSAGES_PER_RUN
+
+    messages = df_raw["content"].astype(str).tolist()
+
+    # === Token + Cost Estimation ===
+    in_tokens, out_tokens, est_cost = estimate_run_cost(messages)
+
+    logger.info(
+        f"Estimated tokens — input: {in_tokens:,}, output: {out_tokens:,}. "
+        f"Estimated cost (gpt-4.1-mini): ${est_cost:.4f}"
+    )
+
+    log_telemetry(
+        "cost_estimate",
+        model="gpt-4.1-mini",
+        estimated_input_tokens=in_tokens,
+        estimated_output_tokens=out_tokens,
+        estimated_cost_usd=round(est_cost, 4),
+        total_messages=total_messages,
+    )
+
+    # === Budget Abort Logic ===
+    if est_cost > MAX_RUN_COST_USD:
+        logger.error(
+            f"ABORTING: Estimated run cost ${est_cost:.2f} exceeds set maximum of ${MAX_RUN_COST_USD:.2f}."
+        )
+        log_telemetry("pipeline_aborted_budget", estimated_cost=est_cost)
+        sys.exit(1)
+
+    # === Stage Semantic Parsing ===
+    logger.info(" Stage 1: Semantic Parsing...")
     parsed_records = []
     max_workers = min(4, os.cpu_count() or 4)
+
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(safe_parse, m): i for i, m in enumerate(df_raw["content"].astype(str))}
+        futures = {ex.submit(safe_parse, m): i for i, m in enumerate(messages)}
         for fut in as_completed(futures):
             res = fut.result()
-            if res: parsed_records.append(res)
+            if res:
+                parsed_records.append(res)
 
     if not parsed_records:
         logger.error(" No parsed records generated. Check raw dataset or API key.")
@@ -163,7 +238,6 @@ def main():
     parsed_df = pd.DataFrame(parsed_records)
     parsed_df.to_csv(PARSED_PATH, index=False, encoding="utf-8")
     logger.info(f" Parsed {len(parsed_df)} records → {PARSED_PATH}")
-    log_telemetry("stage_completed", stage="Semantic Parsing", records=len(parsed_df))
 
     # Stage Normalization
     if not run_stage("Normalization", normalize_dataset, PARSED_PATH, CLEAN_PATH):
@@ -182,7 +256,15 @@ def main():
 
     total_runtime = round(time.time() - start_time, 2)
     logger.info(f" Pipeline completed successfully in {total_runtime}s")
-    log_telemetry("pipeline_completed", duration_sec=total_runtime, total_records=len(parsed_df))
+
+    log_telemetry(
+        "pipeline_completed",
+        duration_sec=total_runtime,
+        total_records=len(parsed_df),
+        model="gpt-4.1-mini",
+        estimated_cost_usd=round(est_cost, 4),
+    )
+
     logger.info("=== ALL STAGES COMPLETE ===")
 
 # === CLI ===
