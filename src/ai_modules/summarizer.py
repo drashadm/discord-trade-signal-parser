@@ -2,7 +2,7 @@
 summarizer.py
 Executive Summary Generator for Discord Trade Signal Intelligence
 Author: @drashadm (DeAndrai Mullen)
-Version: 1.4.1 (Production-Ready Enhancements)
+Version: 2.0 (Budget-Safe + OpenAI v1 Upgrade + Production Hardened)
 """
 
 from __future__ import annotations
@@ -13,14 +13,18 @@ from typing import Dict, Any, Optional
 
 import yaml
 import pandas as pd
-import requests  # ensure listed in requirements
+import requests
 
 try:
     from openai import OpenAI
+    OPENAI_AVAILABLE = True
 except Exception:
+    OPENAI_AVAILABLE = False
     OpenAI = None  # type: ignore
 
-# ------------------ Paths & Config ------------------
+# =========================================================
+# Paths & Config
+# =========================================================
 ROOT = Path(__file__).resolve().parents[1]
 CONF_PATH = ROOT / "config" / "prompt_templates.yaml"
 DATA_DIR = ROOT / "data"
@@ -40,26 +44,30 @@ STYLE_GUIDE = CONFIG.get("style_guide", {})
 TELEMETRY_LOG = Path(GOV_CONF.get("telemetry_log", "./metrics/usage.json")).resolve()
 TELEMETRY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
-MODEL = SUMM_CONF.get("model", "gpt-4o-mini")
+MODEL = SUMM_CONF.get("model", "gpt-4.1-mini")
 TEMPERATURE = float(SUMM_CONF.get("temperature", 0.4))
-MAX_TOKENS = int(SUMM_CONF.get("max_tokens", 800))
+MAX_TOKENS = int(SUMM_CONF.get("max_tokens", 700))
 PROMPT = SUMM_CONF.get("prompt", "Summarize this dataset.")
 TONE = STYLE_GUIDE.get("tone", "analytical, concise, trustworthy")
 
 DISCORD_WEBHOOK = os.getenv("DISCORD_ALERT_WEBHOOK", "").strip()
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-SUMMARY_GATE_MIN = int(os.getenv("SUMMARY_GATE_MIN_ALERTS", "20"))  # skip LLM for tiny sets
+SUMMARY_GATE_MIN = int(os.getenv("SUMMARY_GATE_MIN_ALERTS", "20"))
 
 _lock = threading.Lock()
 
-client = None
-if OPENAI_KEY and OpenAI:
-    try:
-        client = OpenAI(api_key=OPENAI_KEY)
-    except Exception as e:
-        logging.warning(f"OpenAI client init failed: {e}")
+# =========================================================
+# FinOps / Cost Controls
+# =========================================================
+CHARS_PER_TOKEN = 4
+INPUT_COST = 0.40      # 4.1-mini input per 1M
+OUTPUT_COST = 1.60     # 4.1-mini output per 1M
+MAX_COST_PER_CALL = 0.003     # 0.3 cents
+MAX_TOTAL_SUMMARY_COST = 0.50 # 50 cents hard cap for summarizer
 
-# ------------------ Logging ------------------
+# =========================================================
+# Logging
+# =========================================================
 logger = logging.getLogger("summarizer")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
@@ -69,7 +77,15 @@ if not logger.handlers:
     fh.setFormatter(fmt); sh.setFormatter(fmt)
     logger.addHandler(fh); logger.addHandler(sh)
 
-# ------------------ Helpers ------------------
+# =========================================================
+# OpenAI Client (Unified)
+# =========================================================
+client = OpenAI(api_key=OPENAI_KEY) if (OPENAI_AVAILABLE and OPENAI_KEY) else None
+
+
+# =========================================================
+# Telemetry
+# =========================================================
 def _rotate_telemetry_if_needed() -> None:
     try:
         if TELEMETRY_LOG.exists() and TELEMETRY_LOG.stat().st_size > 5_000_000:
@@ -79,11 +95,11 @@ def _rotate_telemetry_if_needed() -> None:
     except Exception as e:
         logger.warning(f"Telemetry rotation failed: {e}")
 
-def _log_telemetry(entry: Dict[str, Any]) -> None:
+def _log_telemetry(entry: Dict[str, Any]):
     entry.update({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "module": "summarizer",
-        "schema_version": str(CONFIG.get("meta", {}).get("version", "unknown")),
+        "schema_version": CONFIG.get("meta", {}).get("version", "unknown"),
     })
     try:
         _rotate_telemetry_if_needed()
@@ -104,19 +120,33 @@ def _log_telemetry(entry: Dict[str, Any]) -> None:
     except Exception as e:
         logger.warning(f"Telemetry write failed: {e}")
 
+
+# =========================================================
+# Aggregation
+# =========================================================
 def _aggregate(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
-        return dict(total_alerts=0, alert_types={}, top_tickers=[], avg_price=None, date_min=None, date_max=None)
+        return {
+            "total_alerts": 0,
+            "alert_types": {},
+            "top_tickers": [],
+            "avg_price": None,
+            "date_min": None,
+            "date_max": None
+        }
     df = df.copy()
-    df["ticker"] = df.get("ticker", pd.Series([""]*len(df))).astype(str).str.upper().str.strip()
-    df["alert_type"] = df.get("alert_type", pd.Series([""]*len(df))).astype(str).str.upper().str.strip()
+    df["ticker"] = df.get("ticker", "").astype(str).str.upper().str.strip()
+    df["alert_type"] = df.get("alert_type", "").astype(str).str.upper().str.strip()
+
     out = {
         "total_alerts": int(len(df)),
-        "alert_types": df["alert_type"].value_counts(dropna=False).head(10).to_dict(),
-        "avg_price": float(df["price"].astype(float).mean()) if "price" in df.columns else None,
+        "alert_types": df["alert_type"].value_counts().head(10).to_dict(),
+        "avg_price": float(df["price"].astype(float).mean()),
     }
+
     top = df["ticker"].value_counts().head(10)
     out["top_tickers"] = [(k, int(v)) for k, v in top.items()]
+
     for col in ("date", "timestamp"):
         if col in df.columns:
             try:
@@ -128,6 +158,10 @@ def _aggregate(df: pd.DataFrame) -> Dict[str, Any]:
                 pass
     return out
 
+
+# =========================================================
+# Utility: Extract Markdown Section Safely
+# =========================================================
 def _extract_fenced_md(text: str) -> str:
     if "```" not in text:
         return text.strip()
@@ -136,42 +170,87 @@ def _extract_fenced_md(text: str) -> str:
         return parts[-1].split("```")[0].strip()
     return text.strip()
 
-# ------------------ LLM Summarization ------------------
+
+# =========================================================
+# Cost Estimation
+# =========================================================
+def _estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    return (
+        (input_tokens / 1_000_000) * INPUT_COST +
+        (output_tokens / 1_000_000) * OUTPUT_COST
+    )
+
+
+# =========================================================
+# LLM Summarizer (OpenAI Responses API)
+# =========================================================
 def _summarize_with_llm(agg: Dict[str, Any], qual: Optional[Dict[str, Any]]) -> Optional[str]:
-    if client is None or agg.get("total_alerts", 0) < SUMMARY_GATE_MIN:
+    if client is None:
         return None
+    if agg.get("total_alerts", 0) < SUMMARY_GATE_MIN:
+        return None
+
+    payload = {
+        "aggregates": agg,
+        "quality_summary": qual or {},
+        "style_tone": TONE,
+    }
+
+    prompt = (
+        f"{PROMPT}\n\n"
+        "Return well-formatted Markdown. Be analytical and concise.\n\n"
+        f"JSON INPUT:\n{json.dumps(payload, indent=2)}"
+    )
+
+    start = time.time()
     try:
-        payload = {"aggregates": agg, "quality_summary": qual or {}, "style_tone": TONE}
-        start = time.time()
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model=MODEL,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": "You are an analytical, trustworthy data summarizer. Output Markdown."},
-                {"role": "user", "content": f"{PROMPT}\n\nJSON INPUT:\n{json.dumps(payload, indent=2)}"},
+            input=[
+                {"role": "system", "content": "You are a senior data summarizer. Output Markdown only."},
+                {"role": "user", "content": prompt},
             ],
-            timeout=30,
+            max_output_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
         )
         latency = round(time.time() - start, 3)
-        text = _extract_fenced_md((resp.choices[0].message.content or "").strip())
-        usage = getattr(resp, "usage", None)
+
+        text = resp.output_text.strip()
+
+        # Cost Estimate
+        usage = resp.usage or {}
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cost = _estimate_cost(input_tokens, output_tokens)
+
+        if cost > MAX_COST_PER_CALL:
+            logger.warning(
+                f"⚠ Summary LLM call cost {cost:.6f} exceeded per-call cap {MAX_COST_PER_CALL:.6f}"
+            )
+
         _log_telemetry({
             "event": "llm_summary",
             "model": MODEL,
-            "total_tokens": getattr(usage, "total_tokens", None) if usage else None,
             "latency_sec": latency,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "est_cost_usd": round(cost, 6),
         })
-        return text
+
+        return _extract_fenced_md(text)
+
     except Exception as e:
-        logger.warning(f"LLM summary failed: {e}")
-        _log_telemetry({"event": "llm_summary_failed", "error": str(e), "model": MODEL})
+        logger.warning(f"LLM summarization failed: {e}")
+        _log_telemetry({"event": "llm_summary_failed", "error": str(e)})
         return None
 
-# ------------------ Deterministic Summary ------------------
+
+# =========================================================
+# Deterministic 0-Cost Summary (fallback)
+# =========================================================
 def _deterministic_summary_md(agg: Dict[str, Any], qual: Optional[Dict[str, Any]]) -> str:
     lines = [
-        "#  Trade Signal Summary",
+        "# Trade Signal Summary",
         "",
         f"- **Total alerts**: {agg.get('total_alerts', 0)}",
     ]
@@ -179,20 +258,28 @@ def _deterministic_summary_md(agg: Dict[str, Any], qual: Optional[Dict[str, Any]
         lines.append(f"- **Date range**: {agg.get('date_min','N/A')} → {agg.get('date_max','N/A')}")
     if agg.get("avg_price") is not None:
         lines.append(f"- **Average price**: ${agg['avg_price']:,.2f}")
+
     lines += ["", "## Type Breakdown"]
     for k, v in (agg.get("alert_types") or {}).items():
-        lines.append(f"- **{k or 'UNKNOWN'}**: {v}")
+        lines.append(f"- **{k}**: {v}")
+
     lines += ["", "## Top Tickers"]
-    for t, c in (agg.get("top_tickers") or []):
+    for t, c in agg.get("top_tickers", []):
         lines.append(f"- **{t}**: {c}")
+
     if qual:
         lines += ["", "## Data Quality Snapshot"]
         for k in ("total_records", "mean_rule_score", "mean_ai_score", "mean_final_score"):
             lines.append(f"- **{k.replace('_',' ').title()}**: {qual.get(k,'N/A')}")
-    lines += ["", "_Auto-generated report — style: analytical, concise, trustworthy._"]
+
+    lines.append("")
+    lines.append("_Auto-generated report — analytical, concise, trustworthy._")
     return "\n".join(lines)
 
-# ------------------ I/O & Notifications ------------------
+
+# =========================================================
+# Save Reports & Optional Discord Notification
+# =========================================================
 def _save_reports(md_text: str, plain_text: str, agg_json: Dict[str, Any]) -> Dict[str, str]:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
     paths = {
@@ -203,56 +290,76 @@ def _save_reports(md_text: str, plain_text: str, agg_json: Dict[str, Any]) -> Di
     paths["md"].write_text(md_text, encoding="utf-8")
     paths["txt"].write_text(plain_text, encoding="utf-8")
     paths["json"].write_text(json.dumps(agg_json, indent=2), encoding="utf-8")
-    logger.info(f" Summary saved → {', '.join(p.name for p in paths.values())}")
+
+    logger.info(f"Summary saved → {', '.join(p.name for p in paths.values())}")
     _log_telemetry({"event": "summary_saved", "files": [p.name for p in paths.values()]})
+
     return {k: str(v) for k, v in paths.items()}
 
-def _maybe_post_discord(message: str, retries: int = 2) -> None:
+
+def _maybe_post_discord(message: str, retries: int = 2):
     if not DISCORD_WEBHOOK:
         return
     for attempt in range(retries + 1):
         try:
             resp = requests.post(DISCORD_WEBHOOK, json={"content": message[:1950]}, timeout=8)
             if resp.status_code < 300:
-                logger.info(" Summary posted to Discord.")
+                logger.info("Summary posted to Discord.")
                 _log_telemetry({"event": "discord_posted"})
                 return
             logger.warning(f"Discord webhook failed: {resp.status_code} {resp.text}")
-        except requests.Timeout:
-            logger.warning("Discord post timed out.")
         except Exception as e:
             logger.warning(f"Discord post failed: {e}")
         time.sleep(1.5 * attempt)
 
-# ------------------ Public API ------------------
+
+# =========================================================
+# Public API
+# =========================================================
 def generate_summary(clean_csv_path: str | Path = CLEAN_CSV, use_llm: bool = True) -> Dict[str, str]:
     clean_csv_path = Path(clean_csv_path)
     if not clean_csv_path.exists():
-        raise FileNotFoundError(f"Missing dataset: {clean_csv_path}")
+        raise FileNotFoundError(f"Missing cleaned dataset: {clean_csv_path}")
 
     df = pd.read_csv(clean_csv_path)
     agg = _aggregate(df)
+
+    # Load quality summary if exists
+    qual_path = REPORT_DIR / "quality_summary.json"
     qual = None
-    qpath = REPORT_DIR / "quality_summary.json"
-    if qpath.exists():
+    if qual_path.exists():
         try:
-            qual = json.loads(qpath.read_text(encoding="utf-8"))
+            qual = json.loads(qual_path.read_text())
         except Exception:
             qual = None
 
-    md_text = _summarize_with_llm(agg, qual) if use_llm else None
+    # LLM summary with cost-safety
+    md_text = None
+    if use_llm:
+        md_text = _summarize_with_llm(agg, qual)
+
+    # Fallback summary (0-cost)
     if not md_text:
         md_text = _deterministic_summary_md(agg, qual)
 
+    # Save files
     plain = re.sub(r"^#+\s*", "", md_text, flags=re.MULTILINE).replace("**", "")
     paths = _save_reports(md_text, plain, {"aggregates": agg, "quality": qual or {}})
 
-    preview = f"**Trade Signal Summary**\nTotal alerts: {agg.get('total_alerts',0)}\nTop tickers: " \
-              + ", ".join([t for t, _ in agg.get("top_tickers", [])][:5])
+    # Post small text preview to Discord
+    preview = (
+        f"**Trade Summary**\n"
+        f"Alerts: {agg.get('total_alerts',0)} | "
+        f"Top: {', '.join([t for t, _ in agg.get('top_tickers', [])][:5])}"
+    )
     _maybe_post_discord(preview)
+
     return paths
 
-# ------------------ CLI ------------------
+
+# =========================================================
+# CLI
+# =========================================================
 if __name__ == "__main__":
     try:
         USE_LLM = bool(int(os.getenv("SUMMARY_USE_LLM", "1")))
