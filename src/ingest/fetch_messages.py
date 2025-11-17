@@ -1,39 +1,58 @@
+"""
+fetch_messages.py
+Stable v1.1.0 — Safe Discord Message Archiver
+Author: @drashadm
+"""
+
 import os
 import asyncio
 import discord
 import pandas as pd
 from dotenv import load_dotenv
+from datetime import datetime, timezone
+import time
 
-# === Load environment variables ===
+# === Load Environment ===
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 CHANNEL_IDS = [int(x.strip()) for x in os.getenv("CHANNEL_IDS", "").split(",") if x.strip()]
 
-# === Configure Discord client ===
-intents = discord.Intents.none()
+# === Discord Intents ===
+intents = discord.Intents.default()
+intents.message_content = True  # Required for reading messages
 intents.guilds = True
-intents.messages = True
-intents.message_content = True
+
 client = discord.Client(intents=intents)
+messages = []
 
-messages = []  # async-safe in memory
 
-# === Event: Ready ===
-@client.event
-async def on_ready():
-    print(f"[INFO] Logged in as {client.user}")
+# === Safe CSV Writer ===
+def save_partial(data, suffix="partial"):
+    os.makedirs("data/raw", exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    path = f"data/raw/discord_messages_{suffix}_{ts}.csv"
+    pd.DataFrame(data).to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"[INFO] Saved partial {len(data)} messages → {path}")
+    return path
 
-    try:
-        for cid in CHANNEL_IDS:
-            channel = await client.fetch_channel(cid)
-            print(f"[INFO] Fetching messages from #{channel.name}")
 
-            # Fetch complete history (Discord rate-limit safe)
-            async for msg in channel.history(limit=None, oldest_first=True):
-                # ✅ include bot messages (important for TradingView alerts)
-                # Skip only system messages with no content
-                if not msg.content:
-                    continue
+async def save_final(data):
+    os.makedirs("data/raw", exist_ok=True)
+    path = "data/raw/discord_messages.csv"
+    pd.DataFrame(data).to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"[INFO] Saved final {len(data)} messages → {path}")
+    return path
+
+
+# === Message Fetch Logic (rate-limit safe) ===
+async def fetch_channel_messages(channel):
+    print(f"[INFO] Fetching messages from #{channel.name}")
+
+    batch_size = 100
+    last_message = None
+    downloaded = 0
+
+    while True:
 
                 messages.append({
                     "channel": channel.name,
