@@ -70,7 +70,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["timestamp"] = datetime.utcnow()
 
-    df["timestamp"] = df["timestamp"].fillna(datetime.utcnow())
+    df["timestamp"] = df["timestamp"].fillna(pd.Timestamp.utcnow())
     df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
     # --- Required row cleaning ---
@@ -85,7 +85,5 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     df["signal_strength"] = "Neutral"
 
     # OPTIONAL: smarter signal strength logic can go here
-
-    return df
 
     return df

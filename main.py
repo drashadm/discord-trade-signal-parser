@@ -12,9 +12,9 @@ from pathlib import Path
 from datetime import datetime
 
 # === MODULE IMPORTS ===
-from parse_signals import parse_dataframe
-from normalize import normalize
-from charts import plot_all_charts
+from src.parse.parse_signals import parse_dataframe
+from src.clean.normalize_data import normalize
+from src.analyze.charts import plot_all_charts
 
 
 # === DIRECTORIES ===
@@ -36,7 +36,7 @@ for p in [RAW_DIR, PARSED_DIR, CLEAN_DIR, CHART_DIR]:
 # === PIPELINE ===
 def stage(title: str):
     print("\n" + "=" * 60)
-    print(f"🟦 {title}")
+    print(f"[STAGE] {title}")
     print("=" * 60)
 
 

@@ -10,7 +10,6 @@ import discord
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timezone
-import time
 
 # === Load Environment ===
 load_dotenv()
@@ -27,58 +26,75 @@ messages = []
 
 
 # === Safe CSV Writer ===
-def save_partial(data, suffix="partial"):
+async def save_messages(data, filename="discord_messages.csv"):
+    """Save messages to CSV file"""
     os.makedirs("data/raw", exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path = f"data/raw/discord_messages_{suffix}_{ts}.csv"
-    pd.DataFrame(data).to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"[INFO] Saved partial {len(data)} messages → {path}")
-    return path
-
-
-async def save_final(data):
-    os.makedirs("data/raw", exist_ok=True)
-    path = "data/raw/discord_messages.csv"
-    pd.DataFrame(data).to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"[INFO] Saved final {len(data)} messages → {path}")
+    path = f"data/raw/{filename}"
+    df = pd.DataFrame(data)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"[INFO] Saved {len(data)} messages → {path}")
     return path
 
 
 # === Message Fetch Logic (rate-limit safe) ===
 async def fetch_channel_messages(channel):
-    print(f"[INFO] Fetching messages from #{channel.name}")
+    """Fetch all messages from a channel"""
+    print(f"[INFO] Fetching messages from #{channel.name}...")
+    
+    batch_messages = []
+    async for msg in channel.history(limit=None, oldest_first=True):
+        # Skip system messages with no content
+        if not msg.content:
+            continue
 
-    batch_size = 100
-    last_message = None
-    downloaded = 0
+        batch_messages.append({
+            "channel": channel.name,
+            "author": msg.author.name,
+            "is_bot": msg.author.bot,
+            "content": msg.content,
+            "created_at": msg.created_at.isoformat(),
+        })
+        
+        # Save in batches to avoid memory issues
+        if len(batch_messages) % 500 == 0:
+            print(f"[INFO] Fetched {len(batch_messages)} messages from #{channel.name}...")
 
-    while True:
+    print(f"[INFO] Finished fetching {len(batch_messages)} messages from #{channel.name}")
+    return batch_messages
 
-                messages.append({
-                    "channel": channel.name,
-                    "author": msg.author.name,
-                    "is_bot": msg.author.bot,
-                    "content": msg.content,
-                    "created_at": msg.created_at.isoformat(),
-                })
 
-        # Save once all messages are collected
-        await save_to_csv(messages)
+# === Event: Ready ===
+@client.event
+async def on_ready():
+    print(f"[INFO] Logged in as {client.user}")
+    
+    all_messages = []
+    
+    try:
+        for cid in CHANNEL_IDS:
+            try:
+                channel = await client.fetch_channel(cid)
+                channel_messages = await fetch_channel_messages(channel)
+                all_messages.extend(channel_messages)
+            except discord.NotFound:
+                print(f"[ERROR] Channel {cid} not found")
+            except discord.Forbidden:
+                print(f"[ERROR] No permission to access channel {cid}")
+            except Exception as e:
+                print(f"[ERROR] Failed to fetch channel {cid}: {e}")
+
+        # Save all messages to CSV
+        if all_messages:
+            await save_messages(all_messages)
+            print(f"[SUCCESS] Fetched total {len(all_messages)} messages from all channels")
+        else:
+            print("[WARN] No messages found")
 
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] Fatal error: {e}")
 
     finally:
         await client.close()
-
-
-# === Async CSV writer ===
-async def save_to_csv(data):
-    os.makedirs("data/raw", exist_ok=True)
-    df = pd.DataFrame(data)
-    path = "data/raw/discord_messages.csv"
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"[INFO] Saved {len(data)} messages → {path}")
 
 
 # === Entry point ===
@@ -86,9 +102,17 @@ async def main():
     if not TOKEN:
         raise ValueError("Missing DISCORD_BOT_TOKEN in environment.")
     if not CHANNEL_IDS:
-        raise ValueError("Missing CHANNEL_IDS in environment.")
+        raise ValueError("Missing CHANNEL_IDS in environment. Format: ID1,ID2,ID3")
+    
+    print(f"[INFO] Fetching from {len(CHANNEL_IDS)} channels...")
     await client.start(TOKEN)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[INFO] Interrupted by user")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+
